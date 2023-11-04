@@ -111,7 +111,6 @@ class SWAGInference(object):
         self,
         train_xs: torch.Tensor,
         model_dir: pathlib.Path,
-        # DONE(1): change inference_mode to InferenceMode.SWAG_DIAGONAL
         # TODO(2): change inference_mode to InferenceMode.SWAG_FULL
         inference_mode: InferenceMode = InferenceMode.SWAG_DIAGONAL,
         # TODO(2): optionally add/tweak hyperparameters
@@ -303,15 +302,13 @@ class SWAGInference(object):
 
             # DONE(1): Perform inference for all samples in `loader` using current model sample,
             #  and add the predictions to per_model_sample_predictions
-            model_sample_predictions = []
+            predictions = []
             for (batch_xs,) in loader:
-                with torch.no_grad():
-                    pred_ys = self.network(batch_xs)
-                    model_sample_predictions.append(pred_ys.softmax(dim=-1))  # Convert logits to probabilities
-            model_sample_predictions = torch.cat(model_sample_predictions)  # Concatenate predictions from all batches
+                predictions.append(self.network(batch_xs))
+            predictions = torch.cat(predictions)
 
             # Add the predictions to per_model_sample_predictions
-            per_model_sample_predictions.append(model_sample_predictions)
+            per_model_sample_predictions.append(torch.softmax(predictions, dim=-1))
 
         assert len(per_model_sample_predictions) == self.bma_samples
         assert all(
