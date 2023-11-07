@@ -376,7 +376,7 @@ class SWAGInference(object):
             )
 
             # Diagonal part
-            sampled_param = current_mean + current_std * z_1
+            sampled_param = current_mean + (1 / np.sqrt(2)) * current_std * z_1
 
             # Full SWAG part
             if self.inference_mode == InferenceMode.SWAG_FULL:
@@ -384,11 +384,7 @@ class SWAGInference(object):
                 K = len(self.deviation_cols)
                 z_2 = torch.randn(K)
                 D_hat = torch.stack([col[name] for col in self.deviation_cols], dim=-1)
-                # print(f"D_hat.shape: {D_hat.shape}")
-                # print(f"z_2.shape: {z_2.shape}")
-                # print(f"param.shape: {param.shape}")
-                # print(f"samp_param.shape: {sampled_param.shape}")
-                sampled_param += 1 / np.sqrt(2 * (K - 1)) * (D_hat @ z_2)
+                sampled_param += (1 / np.sqrt(2 * (K - 1))) * (D_hat @ z_2)
 
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_param
