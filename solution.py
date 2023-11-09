@@ -162,17 +162,19 @@ class SWAGInference(object):
         #  as a dictionary that maps from weight name to values.
         #  Hint: you never need to consider the full vector of weights,
         #  but can always act on per-layer weights (in the format that _create_weight_copy() returns)
+        if InferenceMode.SWAG_DIAGONAL:
+            # Running average of the weights
+            self.weight_avg = self._create_weight_copy()
+            # Running average of the squared weights
+            self.weight_squared_avg = self._create_weight_copy()
+            # Number of steps for which the averages have been maintained
+            self.num_swag_updates = 0
 
-        # Running average of the weights
-        self.weight_avg = self._create_weight_copy()
-        # Running average of the squared weights
-        self.weight_squared_avg = self._create_weight_copy()
-        # Number of steps for which the averages have been maintained
-        self.num_swag_updates = 0
-
+        # TODO(2): create attributes for SWAG-full
+        #  Hint: check collections.deque
         # Full SWAG
-        # DONE(2): create attributes for SWAG-diagonal
-        self.deviation_cols = collections.deque(maxlen=self.deviation_matrix_max_rank)
+        if InferenceMode.SWAG_FULL:
+            ...
 
         # Calibration, prediction, and other attributes
         # HACK(2): create additional attributes, e.g., for calibration
