@@ -312,9 +312,8 @@ class SWAGInference(object):
             self._prediction_threshold = 0.0
             return
 
-        # HACK(1): pick a prediction threshold, either constant or adaptive.
+        # DONE(1): pick a prediction threshold, either constant or adaptive.
         #  The provided value should suffice to pass the easy baseline.
-        self._prediction_threshold = 2.0 / 3.0
 
         # HACK(2): perform additional calibration if desired.
         #  Feel free to remove or change the prediction threshold.
@@ -323,6 +322,22 @@ class SWAGInference(object):
         assert val_ys.size() == (140,)
         assert val_is_snow.size() == (140,)
         assert val_is_cloud.size() == (140,)
+
+        self._prediction_threshold = 0.5
+
+        pred_prob_all = self.predict_probabilities(val_xs)
+        pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
+        pred_ys = self.predict_labels(pred_prob_all)
+        pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
+        thresholds = [0.0] + list(torch.unique(pred_prob_max, sorted=True))
+        costs = []
+        for threshold in thresholds:
+            thresholded_ys = torch.where(
+                pred_prob_max <= threshold, -1 * torch.ones_like(pred_ys), pred_ys
+            )
+            costs.append(cost_function(thresholded_ys, val_ys).item())
+        self._prediction_threshold = thresholds[np.argmin(costs)]
+        print(f"Picking threshold {self._prediction_threshold}")
 
     def predict_probabilities_swag(
         self, loader: torch.utils.data.DataLoader
@@ -437,6 +452,7 @@ class SWAGInference(object):
 
         # A bit better: use a threshold to decide whether to return a label or "don't know" (label -1)
         # HACK(2): implement a different decision rule if desired
+        torch.nn.functional.en
         return torch.where(
             label_probabilities >= self._prediction_threshold,
             max_likelihood_labels,
@@ -788,9 +804,9 @@ def evaluate(
 
         # Plot samples your model is least confident about
         print("Plotting least confident validation set predictions")
-        least_confident_indices = sorted_confidence_indices[:10]
-        fig, ax = plt.subplots(4, 5, figsize=(13, 11))
-        for row in range(0, 4, 2):
+        least_confident_indices = sorted_confidence_indices[:40]
+        fig, ax = plt.subplots(16, 5, figsize=(13, 44))
+        for row in range(0, 16, 2):
             for col in range(5):
                 sample_idx = least_confident_indices[5 * row // 2 + col]
                 ax[row, col].imshow(xs[sample_idx].permute(1, 2, 0).numpy())
