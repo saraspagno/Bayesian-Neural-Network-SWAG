@@ -1,8 +1,11 @@
 import abc
+import argparse
 import collections
 import enum
 import math
+import os
 import pathlib
+import pickle
 import typing
 import warnings
 
@@ -20,7 +23,7 @@ from util import (
     setup_seeds,
 )
 
-EXTENDED_EVALUATION = False
+EXTENDED_EVALUATION = True
 """
 Set `EXTENDED_EVALUATION` to `True` in order to generate additional plots on validation data.
 """
@@ -44,19 +47,13 @@ def main():
     #     " are ignored when generating your submission file."
     # )
 
-    data_dir = pathlib.Path.cwd()
-    model_dir = pathlib.Path.cwd()
-    output_dir = pathlib.Path.cwd()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--load")
+    parser.add_argument("--save")
+    args = parser.parse_args()
 
-    # Load training data
-    train_xs = torch.from_numpy(np.load(data_dir / "train_xs.npz")["train_xs"])
-    raw_train_meta = np.load(data_dir / "train_ys.npz")
-    train_ys = torch.from_numpy(raw_train_meta["train_ys"])
-    train_is_snow = torch.from_numpy(raw_train_meta["train_is_snow"])
-    train_is_cloud = torch.from_numpy(raw_train_meta["train_is_cloud"])
-    dataset_train = torch.utils.data.TensorDataset(
-        train_xs, train_is_snow, train_is_cloud, train_ys
-    )
+    data_dir = pathlib.Path.cwd()
+    output_dir = pathlib.Path.cwd()
 
     # Load validation data
     val_xs = torch.from_numpy(np.load(data_dir / "val_xs.npz")["val_xs"])
@@ -68,10 +65,40 @@ def main():
         val_xs, val_is_snow, val_is_cloud, val_ys
     )
 
+    if args.load and os.path.exists(args.load):
+        with open(args.load, "rb") as f:
+            swag: SWAGInference = pickle.load(f)
+    else:
+        swag = train_model(data_dir)
+        save_path = output_dir / "swag_model.pkl" if args.save is None else args.save
+        with open(save_path, "wb") as f:
+            pickle.dump(swag, f)
+
     # Fix all randomness
     setup_seeds()
 
-    # Build and run the actual solution
+    swag.calibrate(dataset_val)
+
+    # fork_rng ensures that the evaluation does not change the rng state.
+    # That way, you should get exactly the same results even if you remove evaluation
+    # to save computational time when developing the task
+    # (as long as you ONLY use torch randomness, and not e.g. random or numpy.random).
+    with torch.random.fork_rng():
+        evaluate(swag, dataset_val, EXTENDED_EVALUATION, output_dir)
+
+
+def train_model(data_dir: pathlib.Path):
+    model_dir = pathlib.Path.cwd()
+
+    # Load training data
+    train_xs = torch.from_numpy(np.load(data_dir / "train_xs.npz")["train_xs"])
+    raw_train_meta = np.load(data_dir / "train_ys.npz")
+    train_ys = torch.from_numpy(raw_train_meta["train_ys"])
+    train_is_snow = torch.from_numpy(raw_train_meta["train_is_snow"])
+    train_is_cloud = torch.from_numpy(raw_train_meta["train_is_cloud"])
+    dataset_train = torch.utils.data.TensorDataset(
+        train_xs, train_is_snow, train_is_cloud, train_ys
+    )
     train_loader = torch.utils.data.DataLoader(
         dataset_train,
         batch_size=16,
@@ -83,14 +110,7 @@ def main():
         model_dir=model_dir,
     )
     swag.fit(train_loader)
-    swag.calibrate(dataset_val)
-
-    # fork_rng ensures that the evaluation does not change the rng state.
-    # That way, you should get exactly the same results even if you remove evaluation
-    # to save computational time when developing the task
-    # (as long as you ONLY use torch randomness, and not e.g. random or numpy.random).
-    with torch.random.fork_rng():
-        evaluate(swag, dataset_val, EXTENDED_EVALUATION, output_dir)
+    return swag
 
 
 class InferenceMode(enum.Enum):
