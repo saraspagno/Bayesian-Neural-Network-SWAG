@@ -323,12 +323,12 @@ class SWAGInference(object):
         assert val_is_snow.size() == (140,)
         assert val_is_cloud.size() == (140,)
 
-        self._prediction_threshold = 0.5
+        self._prediction_threshold = 0.0
 
         pred_prob_all = self.predict_probabilities(val_xs)
         pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
+
         pred_ys = self.predict_labels(pred_prob_all)
-        pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
         thresholds = [0.0] + list(torch.unique(pred_prob_max, sorted=True))
         costs = []
         for threshold in thresholds:
@@ -336,8 +336,9 @@ class SWAGInference(object):
                 pred_prob_max <= threshold, -1 * torch.ones_like(pred_ys), pred_ys
             )
             costs.append(cost_function(thresholded_ys, val_ys).item())
+        best_idx = np.argmin(costs)
+        print(f"Best cost {costs[best_idx]} at threshold {thresholds[best_idx]}")
         self._prediction_threshold = thresholds[np.argmin(costs)]
-        print(f"Picking threshold {self._prediction_threshold}")
 
     def predict_probabilities_swag(
         self, loader: torch.utils.data.DataLoader
