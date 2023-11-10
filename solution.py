@@ -452,7 +452,6 @@ class SWAGInference(object):
 
         # A bit better: use a threshold to decide whether to return a label or "don't know" (label -1)
         # HACK(2): implement a different decision rule if desired
-        torch.nn.functional.en
         return torch.where(
             label_probabilities >= self._prediction_threshold,
             max_likelihood_labels,
