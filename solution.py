@@ -37,6 +37,8 @@ this solution always performs MAP inference before running your SWAG implementat
 Note that MAP inference can take a long time.
 """
 
+USE_SINGLE_THRESHOLD = True
+
 
 def main():
     # raise RuntimeError(
@@ -211,9 +213,7 @@ class SWAGInference(object):
 
         # Calibration, prediction, and other attributes
         # HACK(2): create additional attributes, e.g., for calibration
-        self._prediction_threshold = (
-            None  # this is an example, feel free to be creative
-        )
+        self._prediction_threshold = None
 
         self._prediction_thresholds = None
 
@@ -335,12 +335,7 @@ class SWAGInference(object):
             self._prediction_threshold = 0.0
             return
 
-        # HACK(1): pick a prediction threshold, either constant or adaptive.
-        #  The provided value should suffice to pass the easy baseline.
-        self._prediction_threshold = 2.0 / 3.0
-
         # HACK(2): perform additional calibration if desired.
-        #  Feel free to remove or change the prediction threshold.
         val_xs, val_is_snow, val_is_cloud, val_ys = validation_data.tensors
         assert val_xs.size() == (140, 3, 60, 60)  # N x C x H x W
         assert val_ys.size() == (140,)
@@ -350,31 +345,29 @@ class SWAGInference(object):
         for _ in range(self.bma_samples):
             self.multiple_sampled_parameters.append(self.sample_parameters())
 
-        # Find probabilities on the validation set
-        val_xs, val_is_snow, val_is_cloud, val_ys = validation_data.tensors
-        pred_prob_all = self.predict_probabilities(val_xs)
-        pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
+        if USE_SINGLE_THRESHOLD:
+            self._prediction_threshold = 2.0 / 3.0
+        else:
+            # Find probabilities on the validation set
+            val_xs, val_is_snow, val_is_cloud, val_ys = validation_data.tensors
+            pred_prob_all = self.predict_probabilities(val_xs)
+            pred_prob_max, pred_ys_argmax = torch.max(pred_prob_all, dim=-1)
 
-        # Calculating one adaptive threshold for each class separately
-        best_thresholds = []
+            # Calculating one adaptive threshold for each class separately
+            for class_idx in range(6):
+                # Get the prediction probabilities when this class has the highest probability
+                class_pred_probs = pred_prob_all[:, class_idx]
+                pred_ys_argmax_class = pred_ys_argmax == class_idx
+                pred_prob_max_class = class_pred_probs[pred_ys_argmax_class]
 
-        # Loop over each class
-        for class_idx in range(6):
-            # Get the prediction probabilities when this class has the highest probability
-            class_pred_probs = pred_prob_all[:, class_idx]
-            pred_ys_argmax_class = pred_ys_argmax == class_idx
-            pred_prob_max_class = class_pred_probs[pred_ys_argmax_class]
+                pred_ys_class = pred_ys_argmax[pred_ys_argmax_class]
+                val_ys_class = val_ys[pred_ys_argmax_class]
 
-            pred_ys_class = pred_ys_argmax[pred_ys_argmax_class]
-            val_ys_class = val_ys[pred_ys_argmax_class]
+                # Determine which threshold would yield the smallest cost on the validation data for this class
+                best_threshold, best_cost = calculate_best_threshold(pred_prob_max_class, pred_ys_class, val_ys_class)
+                self._prediction_thresholds.append(best_threshold)
 
-            # Determine which threshold would yield the smallest cost on the validation data for this class
-            best_threshold, best_cost = calculate_best_threshold(pred_prob_max_class, pred_ys_class, val_ys_class)
-            best_thresholds.append(best_threshold)
-
-            print(f"Class {class_idx}: Best cost {best_cost} at threshold {best_threshold}")
-
-        self._prediction_thresholds = best_thresholds
+                print(f"Class {class_idx}: Best cost {best_cost} at threshold {best_threshold}")
 
     def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader, use_previously_sampled = False) -> torch.Tensor:
         """
@@ -491,7 +484,11 @@ class SWAGInference(object):
 
         # A bit better: use a threshold to decide whether to return a label or "don't know" (label -1)
         # HACK(2): implement a different decision rule if desired
-        thresholds = torch.tensor(self._prediction_thresholds)[max_likelihood_labels]
+        if USE_SINGLE_THRESHOLD:
+            thresholds = self._prediction_threshold
+        else:
+            thresholds = torch.tensor(self._prediction_thresholds)[max_likelihood_labels]
+
         # Use thresholds in the condition
         return torch.where(
             label_probabilities >= thresholds,
@@ -829,7 +826,7 @@ def evaluate(swag: SWAGInference,eval_dataset: torch.utils.data.Dataset,extended
         fig.suptitle("Most confident predictions", size=20)
         fig.savefig(output_dir / "examples_most_confident.pdf")
 
-        # Plot samples your model is least confident about
+        # Plot samples your model is the least confident about
         print("Plotting least confident validation set predictions")
         least_confident_indices = sorted_confidence_indices[:10]
         fig, ax = plt.subplots(4, 5, figsize=(13, 11))
