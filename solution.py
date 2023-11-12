@@ -15,6 +15,7 @@ import torch.optim
 import torch.utils.data
 import tqdm
 from matplotlib import pyplot as plt
+from sklearn.linear_model import LogisticRegression
 
 from util import (
     calc_calibration_curve,
@@ -38,6 +39,7 @@ Note that MAP inference can take a long time.
 """
 
 USE_SINGLE_THRESHOLD = True
+PERFORM_PLATT_SCALING = True
 
 
 def main():
@@ -155,17 +157,17 @@ class SWAGInference(object):
     """
 
     def __init__(
-            self,
-            train_xs: torch.Tensor,
-            model_dir: pathlib.Path,
-            # DONE(2): change inference_mode to InferenceMode.SWAG_FULL
-            inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
-            # HACK(2): optionally add/tweak hyperparameters
-            swag_epochs: int = 30,
-            swag_learning_rate: float = 0.045,
-            swag_update_freq: int = 1,
-            deviation_matrix_max_rank: int = 15,
-            bma_samples: int = 30,
+        self,
+        train_xs: torch.Tensor,
+        model_dir: pathlib.Path,
+        # DONE(2): change inference_mode to InferenceMode.SWAG_FULL
+        inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
+        # HACK(2): optionally add/tweak hyperparameters
+        swag_epochs: int = 30,
+        swag_learning_rate: float = 0.045,
+        swag_update_freq: int = 1,
+        deviation_matrix_max_rank: int = 15,
+        bma_samples: int = 30,
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -214,11 +216,10 @@ class SWAGInference(object):
         # Calibration, prediction, and other attributes
         # HACK(2): create additional attributes, e.g., for calibration
         self._prediction_threshold = None
-
-        self._prediction_thresholds = None
-
+        self._prediction_thresholds = []
         # List of multiple (bma_samples) parameters model
         self.multiple_sampled_parameters = []
+        self.log_regs = []
 
     def update_swag(self) -> None:
         """
@@ -345,9 +346,15 @@ class SWAGInference(object):
         for _ in range(self.bma_samples):
             self.multiple_sampled_parameters.append(self.sample_parameters())
 
+        if PERFORM_PLATT_SCALING:
+            # Train the logistic regression
+            self.platt_scaling(val_xs, val_ys)
+
         if USE_SINGLE_THRESHOLD:
-            self._prediction_threshold = 2.0 / 3.0
+            self._prediction_threshold = 0.2
+            print(f'Using constant threshold: {self._prediction_threshold}')
         else:
+            print('Using adaptive threshold')
             # Find probabilities on the validation set
             val_xs, val_is_snow, val_is_cloud, val_ys = validation_data.tensors
             pred_prob_all = self.predict_probabilities(val_xs)
@@ -369,7 +376,24 @@ class SWAGInference(object):
 
                 print(f"Class {class_idx}: Best cost {best_cost} at threshold {best_threshold}")
 
-    def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader, use_previously_sampled = False) -> torch.Tensor:
+    def platt_scaling(self, xs, ys):
+        predictions = []
+        for i in tqdm.trange(self.bma_samples, desc="Performing Platt Scaling"):
+            self.update_network_parameters(i)
+            predictions.append(self.network(xs))
+
+        raw_scores = torch.stack(predictions).mean(dim=0)
+        raw_scores_np = raw_scores.detach().numpy()
+        val_ys_np = ys.numpy()
+
+        for class_idx in range(6):
+            class_scores = raw_scores_np[:, class_idx].reshape(-1, 1)
+            class_labels = (val_ys_np == class_idx).astype(int)
+            log_reg = LogisticRegression().fit(class_scores, class_labels)
+            self.log_regs.append(log_reg)
+        print("Trained logistic regression")
+
+    def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader) -> torch.Tensor:
         """
         Perform Bayesian model averaging using your SWAG statistics and predict
         probabilities for all samples in the loader.
@@ -393,7 +417,18 @@ class SWAGInference(object):
             #  and add the predictions to per_model_sample_predictions
             predictions = []
             for (batch_xs,) in loader:
-                predictions.append(self.network(batch_xs))
+                if PERFORM_PLATT_SCALING:
+                    raw_scores = self.network(batch_xs).detach().numpy()
+                    batch_probabilities = []
+                    for class_idx in range(6):
+                        class_scores = raw_scores[:, class_idx].reshape(-1, 1)
+                        probabilities = self.log_regs[class_idx].predict_proba(class_scores)
+                        batch_probabilities.append(torch.tensor(probabilities[:, 1]))
+                    batch_probabilities = torch.stack(batch_probabilities, dim=1)
+                    predictions.append(batch_probabilities)
+                else:
+                    predictions.append(self.network(batch_xs))
+
             predictions = torch.cat(predictions)
 
             # Add the predictions to per_model_sample_predictions
@@ -503,7 +538,10 @@ class SWAGInference(object):
             for name, param in self.network.named_parameters()
         }
 
-    def fit(self,loader: torch.utils.data.DataLoader) -> None:
+    def fit(
+        self,
+        loader: torch.utils.data.DataLoader,
+    ) -> None:
         """
         Perform full SWAG fitting procedure.
         If `PRETRAINED_WEIGHTS_FILE` is `True`, this method skips the MAP inference part,
@@ -527,8 +565,8 @@ class SWAGInference(object):
 
         # SWAG
         if self.inference_mode in (
-                InferenceMode.SWAG_DIAGONAL,
-                InferenceMode.SWAG_FULL,
+            InferenceMode.SWAG_DIAGONAL,
+            InferenceMode.SWAG_FULL,
         ):
             self.fit_swag(loader)
 
@@ -635,7 +673,9 @@ class SWAGInference(object):
             else:
                 return self.predict_probabilities_swag(loader)
 
-    def predict_probabilities_map(self, loader: torch.utils.data.DataLoader) -> torch.Tensor:
+    def predict_probabilities_map(
+        self, loader: torch.utils.data.DataLoader
+    ) -> torch.Tensor:
         """
         Predict probabilities assuming that self.network is a MAP estimate.
         This simply performs a forward pass for every batch in `loader`,
@@ -716,10 +756,10 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
 
     # HACK(2): Add and store additional arguments if you decide to implement a custom scheduler
     def __init__(
-            self,
-            optimizer: torch.optim.Optimizer,
-            epochs: int,
-            steps_per_epoch: int,
+        self,
+        optimizer: torch.optim.Optimizer,
+        epochs: int,
+        steps_per_epoch: int,
     ):
         self.epochs = epochs
         self.steps_per_epoch = steps_per_epoch
@@ -737,7 +777,12 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
         ]
 
 
-def evaluate(swag: SWAGInference,eval_dataset: torch.utils.data.Dataset,extended_evaluation: bool,output_dir: pathlib.Path,) -> None:
+def evaluate(
+    swag: SWAGInference,
+    eval_dataset: torch.utils.data.Dataset,
+    extended_evaluation: bool,
+    output_dir: pathlib.Path,
+) -> None:
     """
     Evaluate your model.
     Feel free to change or extend this code.
@@ -785,9 +830,9 @@ def evaluate(swag: SWAGInference,eval_dataset: torch.utils.data.Dataset,extended
     # Determine which threshold would yield the smallest cost on the validation data
     # Note that this threshold does not necessarily generalize to the test set!
     # However, it can help you judge your method's calibration.
-    # best_threshold, best_cost = calculate_best_threshold(pred_prob_max, pred_ys, ys)
-    # print(f"Best cost {best_cost} at threshold {best_threshold}")
-    # print("Note that this threshold does not necessarily generalize to the test set!")
+    best_threshold, best_cost = calculate_best_threshold(pred_prob_max, pred_ys, ys)
+    print(f"Best cost {best_cost} at threshold {best_threshold}")
+    print("Note that this threshold does not necessarily generalize to the test set!")
 
     # Calculate ECE and plot the calibration curve
     calibration_data = calc_calibration_curve(
@@ -862,9 +907,9 @@ class CNN(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            in_channels: int,
-            out_classes: int,
+        self,
+        in_channels: int,
+        out_classes: int,
     ):
         super().__init__()
 
